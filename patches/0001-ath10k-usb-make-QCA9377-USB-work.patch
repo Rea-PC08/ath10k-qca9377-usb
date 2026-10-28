@@ -1,0 +1,181 @@
+diff --git a/drivers/net/wireless/ath/ath10k/core.c b/drivers/net/wireless/ath/ath10k/core.c
+index f9b51d9..5dc6d8e 100644
+--- a/drivers/net/wireless/ath/ath10k/core.c
++++ b/drivers/net/wireless/ath/ath10k/core.c
+@@ -662,6 +662,40 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
+ 		.delay_unmap_buffer = false,
+ 		.mcast_frame_registration = false,
+ 	},
++	{
++		.id = QCA9377_HW_1_1_DEV_VERSION,
++		.dev_id = 0x0042,
++		.bus = ATH10K_BUS_USB,
++		.name = "qca9377 hw1.1 usb",
++		.patch_load_addr = QCA9377_HW_1_0_PATCH_LOAD_ADDR,
++		.uart_pin = 19,
++		.led_pin = 0,
++		.otp_exe_param = 0,
++		.channel_counters_freq_hz = 88000,
++		.max_probe_resp_desc_thres = 0,
++		.cal_data_len = 8124,
++		.fw = {
++			.dir = ATH10K_FW_DIR "/QCA9377/hw1.1",
++			.board_size = QCA9377_BOARD_DATA_SZ,
++			.board_ext_size = QCA9377_BOARD_EXT_DATA_SZ,
++		},
++		.rx_desc_ops = &qca988x_rx_desc_ops,
++		.start_once = true,
++		.hw_ops = &qca6174_ops,
++		.hw_clk = qca6174_clk,
++		.target_cpu_freq = 176000000,
++		.decap_align_bytes = 4,
++		.n_cipher_suites = 8,
++		.num_peers = TARGET_QCA9377_HL_NUM_PEERS,
++		.ast_skid_limit = 0x10,
++		.num_wds_entries = 0x20,
++		.uart_pin_workaround = true,
++		.dynamic_sar_support = false,
++		.hw_restart_disconnect = false,
++		.use_fw_tx_credits = true,
++		.delay_unmap_buffer = false,
++		.mcast_frame_registration = false,
++	},
+ 	{
+ 		.id = QCA4019_HW_1_0_DEV_VERSION,
+ 		.dev_id = 0,
+@@ -2974,6 +3008,9 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
+ 	int status;
+ 	u32 val;
+ 
++	if (ar->is_started && ar->hw_params.start_once)
++		return 0;
++
+ 	lockdep_assert_held(&ar->conf_mutex);
+ 
+ 	clear_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
+@@ -3282,6 +3319,8 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
+ 	if (status)
+ 		goto err_hif_stop;
+ 
++	ar->is_started = true;
++
+ 	return 0;
+ 
+ err_hif_stop:
+@@ -3336,6 +3375,7 @@ void ath10k_core_stop(struct ath10k *ar)
+ 	ath10k_wmi_detach(ar);
+ 
+ 	ar->id.bmi_ids_valid = false;
++	ar->is_started = false;
+ }
+ EXPORT_SYMBOL(ath10k_core_stop);
+ 
+@@ -3475,12 +3515,14 @@ static int ath10k_core_probe_fw(struct ath10k *ar)
+ 		goto err_unlock;
+ 	}
+ 
+-	ath10k_debug_print_boot_info(ar);
+-	ath10k_core_stop(ar);
+-
+-	mutex_unlock(&ar->conf_mutex);
+-
+-	ath10k_hif_power_down(ar);
++	if (ar->hw_params.start_once) {
++		mutex_unlock(&ar->conf_mutex);
++	} else {
++		ath10k_debug_print_boot_info(ar);
++		ath10k_core_stop(ar);
++		mutex_unlock(&ar->conf_mutex);
++		ath10k_hif_power_down(ar);
++	}
+ 	return 0;
+ 
+ err_unlock:
+diff --git a/drivers/net/wireless/ath/ath10k/core.h b/drivers/net/wireless/ath/ath10k/core.h
+index 4026cc4..350a8cd 100644
+--- a/drivers/net/wireless/ath/ath10k/core.h
++++ b/drivers/net/wireless/ath/ath10k/core.h
+@@ -1316,6 +1316,7 @@ struct ath10k {
+ 
+ 	bool coex_support;
+ 	int coex_gpio_pin;
++	bool is_started;
+ 
+ 	s32 tx_power_2g_limit;
+ 	s32 tx_power_5g_limit;
+diff --git a/drivers/net/wireless/ath/ath10k/htt.c b/drivers/net/wireless/ath/ath10k/htt.c
+index dbaf262..d62d4b3 100644
+--- a/drivers/net/wireless/ath/ath10k/htt.c
++++ b/drivers/net/wireless/ath/ath10k/htt.c
+@@ -317,7 +317,11 @@ int ath10k_htt_connect(struct ath10k_htt *htt)
+ 	}
+ 
+ 	htt->disable_tx_comp = ath10k_hif_get_htt_tx_complete(htt->ar);
+-	if (htt->disable_tx_comp)
++	/* USB: local TX completion, but no HTC credit flow on the data endpoint.
++	 * It starts with zero credits and the firmware returns them very rarely,
++	 * which limited TX to about one frame every 3 seconds.
++	 */
++	if (htt->disable_tx_comp && ar->hif.bus != ATH10K_BUS_USB)
+ 		ath10k_htc_change_tx_credit_flow(&htt->ar->htc, htt->eid, true);
+ 
+ 	return 0;
+diff --git a/drivers/net/wireless/ath/ath10k/hw.h b/drivers/net/wireless/ath/ath10k/hw.h
+index 442091c..8d17bdd 100644
+--- a/drivers/net/wireless/ath/ath10k/hw.h
++++ b/drivers/net/wireless/ath/ath10k/hw.h
+@@ -634,6 +634,9 @@ struct ath10k_hw_params {
+ 
+ 	/* The hardware support multicast frame registrations */
+ 	bool mcast_frame_registration;
++
++	/* keep the target running after BMI init (USB firmware) */
++	bool start_once;
+ };
+ 
+ struct htt_resp;
+diff --git a/drivers/net/wireless/ath/ath10k/mac.c b/drivers/net/wireless/ath/ath10k/mac.c
+index 97e0a75..c6aba18 100644
+--- a/drivers/net/wireless/ath/ath10k/mac.c
++++ b/drivers/net/wireless/ath/ath10k/mac.c
+@@ -4819,8 +4819,10 @@ void ath10k_halt(struct ath10k *ar)
+ 	ath10k_scan_finish(ar);
+ 	ath10k_peer_cleanup_all(ar);
+ 	ath10k_stop_radar_confirmation(ar);
+-	ath10k_core_stop(ar);
+-	ath10k_hif_power_down(ar);
++	if (!ar->hw_params.start_once) {
++		ath10k_core_stop(ar);
++		ath10k_hif_power_down(ar);
++	}
+ 
+ 	spin_lock_bh(&ar->data_lock);
+ 	list_for_each_entry(arvif, &ar->arvifs, list)
+diff --git a/drivers/net/wireless/ath/ath10k/usb.c b/drivers/net/wireless/ath/ath10k/usb.c
+index 3b51b7f..858f205 100644
+--- a/drivers/net/wireless/ath/ath10k/usb.c
++++ b/drivers/net/wireless/ath/ath10k/usb.c
+@@ -725,6 +725,15 @@ static int ath10k_usb_hif_resume(struct ath10k *ar)
+ }
+ #endif
+ 
++/* The QCA9377 USB firmware never sends HTT_T2H_MSG_TYPE_TX_COMPL_IND, so TX
++ * completion is done locally when the USB transfer completes. Without this
++ * the pending TX count fills up and the link freezes after a few packets.
++ */
++static int ath10k_usb_get_htt_tx_complete(struct ath10k *ar)
++{
++	return 1;
++}
++
+ static const struct ath10k_hif_ops ath10k_usb_hif_ops = {
+ 	.tx_sg			= ath10k_usb_hif_tx_sg,
+ 	.diag_read		= ath10k_usb_hif_diag_read,
+@@ -735,6 +744,7 @@ static const struct ath10k_hif_ops ath10k_usb_hif_ops = {
+ 	.map_service_to_pipe	= ath10k_usb_hif_map_service_to_pipe,
+ 	.get_default_pipe	= ath10k_usb_hif_get_default_pipe,
+ 	.get_free_queue_number	= ath10k_usb_hif_get_free_queue_number,
++	.get_htt_tx_complete	= ath10k_usb_get_htt_tx_complete,
+ 	.power_up		= ath10k_usb_hif_power_up,
+ 	.power_down		= ath10k_usb_hif_power_down,
+ #ifdef CONFIG_PM
