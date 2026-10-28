@@ -16,6 +16,7 @@ Debian 13 (kernel `6.12.107+deb13-amd64`), Dell OptiPlex 3060 Micro, Linksys WUS
 | 42 MB download from the LAN | 1.1 MB/s (~9 Mbit/s), no stall |
 | 7 files, 237 MB in a row + 3 min ping | all complete, 0 % packet loss |
 | PC reboot with the adapter plugged in | Wi-Fi comes back and reconnects by itself |
+| Reboot with the Ethernet cable unplugged | connects over Wi-Fi only, Xibo player keeps working |
 
 Before the fix: no network interface at all; with only the hardware entry added, the link
 froze after about 2 MB.
@@ -60,7 +61,9 @@ Uninstall: `sudo ./uninstall.sh`.
   applied to their own `ath10k` source.
 - Unloading the driver (`rmmod`) leaves the adapter's firmware running: the adapter must be
   unplugged and replugged before the driver can load again. A PC reboot is fine.
-- Turning Wi-Fi power saving off (`iw dev ... set power_save off`) crashes the firmware.
+- Changing Wi-Fi power saving while the link is busy (`iw dev ... set power_save ...`) crashed
+  the firmware once. Setting it at connection time works: all tests above ran with
+  NetworkManager `wifi.powersave=2` (power saving off).
 - Latency rises under heavy load (around 250 ms on average during downloads).
 - The kernel still prints the "USB support is incomplete" warning; it is harmless here.
 
